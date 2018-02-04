@@ -1,5 +1,7 @@
 # short-paths
 
+[Documentation on docs.rs](https://docs.rs/short-paths/0.1.0/short_paths/)
+
 This is an implementation of the algorithm to find short s-t paths in a graph
 given by Eppstein in [this paper](http://citeseer.ist.psu.edu/viewdoc/download;jsessionid=7BB56B2ABC7C9113C121413A62AF3974?doi=10.1.1.30.3705&rep=rep1&type=pdf).
 Specifically, it constructs the path graph as described in section 2,
