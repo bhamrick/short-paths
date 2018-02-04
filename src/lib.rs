@@ -511,7 +511,7 @@ impl<'a, N, E, K> ShortPathsIterator<'a, N, E, K>
     fn path_end(&self, path_data: &PathData) -> NodeIndex {
         match path_data {
             &PathData::Empty => {
-                self.source
+                self.path_graph_root
             },
             &PathData::Augment(_, edge_idx) => {
                 self.path_graph.edge_endpoints(edge_idx).unwrap().1
@@ -551,11 +551,15 @@ impl<'a, N, E, K> ShortPathsIterator<'a, N, E, K>
                                 path.push(spt_edge);
                                 current_vertex = spt_edge_target;
                             },
-                            _ => panic!("Reached a vertex with no outgoing shortest path tree edge!"),
+                            _ => {
+                                panic!("Reached a vertex with no outgoing shortest path tree edge!")
+                            },
                         }
                     }
                     path.push(non_spt_edge);
                     current_vertex = non_spt_target;
+                } else {
+                    panic!("Cross edge doesn't correspond to a heap edge?")
                 }
             }
         }
