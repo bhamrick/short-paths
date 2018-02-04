@@ -15,7 +15,7 @@ mod tests;
 use petgraph::{Direction, Graph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::algo::Measure;
-use petgraph::visit::{EdgeRef, IntoEdgesDirected, Visitable, VisitMap};
+use petgraph::visit::{EdgeRef, IntoEdgesDirected, IntoNodeReferences, NodeRef, Visitable, VisitMap};
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::collections::hash_map::Entry;
 use std::hash::Hash;
@@ -23,13 +23,33 @@ use std::ops::Sub;
 
 use scored::{MinScored, Scored};
 
+#[derive(Debug)]
+pub struct ShortPathsIterator<'a, N: 'a, E: 'a, K>
+    where
+    K: PartialOrd
+{
+    graph: &'a Graph<N, E>,
+    source: NodeIndex,
+    spt: HashMap<NodeIndex, (K, Option<EdgeIndex>)>,
+    path_graph: Graph<PathNode, (PathEdge, K)>,
+    path_graph_root: NodeIndex,
+    generated_paths: Vec<PathData>,
+    visit_queue: BinaryHeap<MinScored<K, PathData>>,
+}
+
+#[derive(Clone, Debug)]
+pub enum PathData {
+    Empty,
+    Augment(usize, EdgeIndex),
+}
+
 // Compute the shortest path tree toward the target. Returns it as a map
 // mapping node IDs to the distance from the target and the outgoing edge
 // in the SPT.
 //
 // The code is similar to that of the `dijkstra` function in petgraph, but
 // the main Dijkstra loop is structured slightly differently.
-pub fn shortest_path_tree<G, F, K>(graph: G, target: G::NodeId, mut edge_cost: F)
+fn build_shortest_path_tree<G, F, K>(graph: G, target: G::NodeId, mut edge_cost: F)
     -> HashMap<G::NodeId, (K, Option<G::EdgeId>)> 
     where
     G: IntoEdgesDirected + Visitable,
@@ -86,7 +106,7 @@ pub fn shortest_path_tree<G, F, K>(graph: G, target: G::NodeId, mut edge_cost: F
 // V(G) -> V(D(G))
 // A vertex can be missing from this mapping if the only outgoing paths
 // toward the sink are in the shortest path tree.
-pub fn heap_graph<N, E, K, F>(
+fn build_heap_graph<N, E, K, F>(
     graph: &Graph<N, E>,
     target: NodeIndex,
     spt: &HashMap<NodeIndex, (K, Option<EdgeIndex>)>,
@@ -127,9 +147,7 @@ pub fn heap_graph<N, E, K, F>(
     let mut visit_order = VecDeque::new();
     visit_order.push_back(target);
 
-    println!();
     while let Some(node) = visit_order.pop_front() {
-        println!("{:?}", node);
         let (_, successor) = spt[&node];
         match successor {
             Some(successor_edge_id) => {
@@ -221,6 +239,81 @@ pub fn heap_graph<N, E, K, F>(
     }
 
     (result_graph, heap_roots)
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PathNode {
+    Root,
+    Heap(EdgeIndex),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PathEdge {
+    Heap,
+    Cross,
+    Initial,
+}
+
+fn build_path_graph<N, E, K>(
+    graph: &Graph<N, E>,
+    source: NodeIndex,
+    spt: &HashMap<NodeIndex, (K, Option<EdgeIndex>)>,
+    heap_graph: &Graph<(EdgeIndex, K), ()>,
+    heap_roots: &HashMap<NodeIndex, NodeIndex>,
+) -> (Graph<PathNode, (PathEdge, K)>, NodeIndex)
+    where
+    E: Copy,
+    K: Measure + Sub<Output=K> + Copy,
+{
+    let mut result_graph = Graph::<PathNode, (PathEdge, K)>::new();
+    // Map from heap graph `dg` nodes to result graph's nodes.
+    let mut node_map: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+
+    let root_node = result_graph.add_node(PathNode::Root);
+
+    for n in heap_graph.node_references() {
+        let &(e_id, _) = n.weight();
+        let new_node = result_graph.add_node(PathNode::Heap(e_id));
+
+        node_map.insert(n.id(), new_node);
+    }
+
+    // Create heap edges
+    for e in heap_graph.edge_references() {
+        let s = e.source();
+        let t = e.target();
+        let &(_, source_edge_sidetrack) = heap_graph.node_weight(s).unwrap();
+        let &(_, target_edge_sidetrack) = heap_graph.node_weight(t).unwrap();
+
+        let s_node = node_map[&s];
+        let t_node = node_map[&t];
+        result_graph.add_edge(s_node, t_node, (PathEdge::Heap, target_edge_sidetrack - source_edge_sidetrack));
+    }
+
+    // Create cross edges
+    for n in heap_graph.node_references() {
+        let &(e_id, _) = n.weight();
+        let (e_source, e_target) = graph.edge_endpoints(e_id).unwrap();
+        if let Some(&(_, Some(spt_edge_id))) = spt.get(&e_source) {
+            if e_id == spt_edge_id {
+                continue
+            }
+        }
+        let new_source = node_map[&n.id()];
+        if let Some(&root_node) = heap_roots.get(&e_target) {
+            let &(_, root_edge_sidetrack) = heap_graph.node_weight(root_node).unwrap();
+            let new_target = node_map[&root_node];
+            result_graph.add_edge(new_source, new_target, (PathEdge::Cross, root_edge_sidetrack));
+        }
+    }
+
+    // Create initial edge
+    let initial_root = heap_roots[&source];
+    let &(_, initial_root_sidetrack) = heap_graph.node_weight(initial_root).unwrap();
+    let initial_target = node_map[&initial_root];
+    result_graph.add_edge(root_node, initial_target, (PathEdge::Initial, initial_root_sidetrack));
+
+    (result_graph, root_node)
 }
 
 // Creates a heap out of the given values, merges it with the existing heap
@@ -382,5 +475,152 @@ fn sift_down<T: PartialOrd>(vec: &mut [T], mut pos: usize) {
         // Otherwise, swap down and continue
         vec.swap(pos, child);
         pos = child;
+    }
+}
+
+impl<'a, N, E, K> ShortPathsIterator<'a, N, E, K>
+    where
+    N: 'a + Eq + Copy,
+    E: 'a + Copy,
+    K: PartialOrd + Measure + Sub<Output=K> + Copy,
+{
+    pub fn new<F>(graph: &'a Graph<N, E>, source: NodeIndex, target: NodeIndex, mut edge_cost: F) -> Self
+        where
+        F: FnMut(E) -> K,
+    {
+        let spt = build_shortest_path_tree(graph, target, |e_ref| { edge_cost(*e_ref.weight()) });
+        let (heap_graph, heap_roots) = build_heap_graph(graph, target, &spt, edge_cost);
+        let (path_graph, path_graph_root) = build_path_graph(graph, source, &spt, &heap_graph, &heap_roots);
+
+        let generated_paths = Vec::new();
+        let mut visit_queue = BinaryHeap::new();
+        visit_queue.push(MinScored(K::default(), PathData::Empty));
+
+        ShortPathsIterator {
+            graph,
+            source,
+            spt,
+            path_graph,
+            path_graph_root,
+            generated_paths,
+            visit_queue,
+        }
+    }
+
+    // Returns the final node of the path graph for the given path data.
+    fn path_end(&self, path_data: &PathData) -> NodeIndex {
+        match path_data {
+            &PathData::Empty => {
+                self.source
+            },
+            &PathData::Augment(_, edge_idx) => {
+                self.path_graph.edge_endpoints(edge_idx).unwrap().1
+            }
+        }
+    }
+
+    fn unwind_path_graph_path(&self, path_data: &PathData) -> Vec<EdgeIndex> {
+        match path_data {
+            &PathData::Empty => {
+                Vec::new()
+            },
+            &PathData::Augment(parent_idx, edge_idx) => {
+                let mut path = self.unwind_path_graph_path(&self.generated_paths[parent_idx]);
+                path.push(edge_idx);
+                path
+            },
+        }
+    }
+
+    fn expand_path(&self, path_graph_path: &[EdgeIndex]) -> Vec<EdgeIndex> {
+        let mut path = Vec::new();
+        let mut current_vertex = self.source;
+        let mut final_node = self.path_graph_root;
+
+        // Follow the shortest path tree to each cross edge
+        for &e_id in path_graph_path.iter() {
+            let (e_source, e_target) = self.path_graph.edge_endpoints(e_id).unwrap();
+            final_node = e_target;
+            if let Some(&(PathEdge::Cross, _)) = self.path_graph.edge_weight(e_id) {
+                if let Some(&PathNode::Heap(non_spt_edge)) = self.path_graph.node_weight(e_source) {
+                    let (non_spt_source, non_spt_target) = self.graph.edge_endpoints(non_spt_edge).unwrap();
+                    while current_vertex != non_spt_source {
+                        match self.spt.get(&current_vertex) {
+                            Some(&(_, Some(spt_edge))) => {
+                                let (_, spt_edge_target) = self.graph.edge_endpoints(spt_edge).unwrap();
+                                path.push(spt_edge);
+                                current_vertex = spt_edge_target;
+                            },
+                            _ => panic!("Reached a vertex with no outgoing shortest path tree edge!"),
+                        }
+                    }
+                    path.push(non_spt_edge);
+                    current_vertex = non_spt_target;
+                }
+            }
+        }
+
+        // Use one more non-SPT edge defined by the ending node of the path graph path
+        if let Some(&PathNode::Heap(non_spt_edge)) = self.path_graph.node_weight(final_node) {
+            let (non_spt_source, non_spt_target) = self.graph.edge_endpoints(non_spt_edge).unwrap();
+            while current_vertex != non_spt_source {
+                match self.spt.get(&current_vertex) {
+                    Some(&(_, Some(spt_edge))) => {
+                        let (_, spt_edge_target) = self.graph.edge_endpoints(spt_edge).unwrap();
+                        path.push(spt_edge);
+                        current_vertex = spt_edge_target;
+                    },
+                    _ => panic!("Reached a vertex with no outgoing shortest path tree edge!"),
+                }
+            }
+            path.push(non_spt_edge);
+            current_vertex = non_spt_target;
+        }
+
+        // Finish the path via the shortest path tree
+        while let Some(&(_, Some(spt_edge))) = self.spt.get(&current_vertex) {
+            let (_, spt_edge_target) = self.graph.edge_endpoints(spt_edge).unwrap();
+            path.push(spt_edge);
+            current_vertex = spt_edge_target;
+        }
+
+        path
+    }
+}
+
+impl<'a, N, E, K> Iterator for ShortPathsIterator<'a, N, E, K>
+    where
+    N: 'a + Eq + Copy,
+    E: 'a + Copy,
+    K: PartialOrd + Measure + Sub<Output=K> + Copy,
+{
+    type Item=Vec<EdgeIndex>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let front = self.visit_queue.pop();
+        match front {
+            Some(MinScored(path_score, path_data)) => {
+                let path_graph_path = self.unwind_path_graph_path(&path_data);
+                let path_to_return = self.expand_path(&path_graph_path);
+
+                let final_node = self.path_end(&path_data);
+
+                let path_index = self.generated_paths.len();
+                self.generated_paths.push(path_data);
+
+                for edge in self.path_graph.edges(final_node) {
+                    let &(_, edge_cost) = edge.weight();
+                    let new_path_cost = path_score + edge_cost;
+                    let new_path_data = PathData::Augment(path_index, edge.id());
+
+                    self.visit_queue.push(MinScored(new_path_cost, new_path_data));
+                }
+
+                Some(path_to_return)
+            },
+            None => {
+                None
+            },
+        }
     }
 }
