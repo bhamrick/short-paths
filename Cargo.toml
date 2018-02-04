@@ -1,0 +1,7 @@
+[package]
+name = "graph-paths"
+version = "0.1.0"
+authors = ["Brian Hamrick <brian.c.hamrick@gmail.com>"]
+
+[dependencies]
+petgraph = "0.4.11"
