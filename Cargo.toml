@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Brian Hamrick <brian.c.hamrick@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/bhamrick/short-paths"
+keywords = ["graph", "paths"]
 description = """
 Iterate over s-t paths in a graph in increasing order of length.
 """
